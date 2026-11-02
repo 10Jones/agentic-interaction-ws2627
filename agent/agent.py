@@ -49,7 +49,6 @@ def run(task: str, cfg: dict, log) -> str:
             log.log("final", duration_ms=llm_ms, detail=answer)
             return answer
 
-        # TODO(clarify)
         messages.append(
             {
                 "role": "assistant",
@@ -92,7 +91,7 @@ def run(task: str, cfg: dict, log) -> str:
                 duration_ms=tool_ms,
             )
 
-            # tool_call_id links this result to teh request above
+            # tool_call_id links this result to the request above
             messages.append(
                 {
                     "role": "tool",
