@@ -5,7 +5,7 @@ import datetime
 import requests
 
 # JSON schema in the OPENAI "tools" format. The model never runs the tool itself:
-# it only returns the tool name and arguements, and the code executes the call.
+# it only returns the tool name and arguments, and the code executes the call.
 # The description matters, because the model decides from it when to call the tool.
 
 TOOLS = [
@@ -33,17 +33,17 @@ TOOLS = [
 
 
 def get_calendar_day(date: str, base_url: str) -> dict:
-    """Load the appontments of one day from the calendar endpoint.
+    """Load the appointments of one day from the calendar endpoint.
 
     Errors are returned as {error: ...} instead of being raised, so the model can see
-    what went wrong and esplains it to the user.
+    what went wrong and explains it to the user.
     """
 
     # validate the format first
     try:
         datetime.date.fromisoformat(date)
     except ValueError:
-        return {"error": f"Invalid date '{date}', exprected format YYYY-MM-DD."}
+        return {"error": f"Invalid date '{date}', expected format YYYY-MM-DD."}
 
     url = f"{base_url}/calendar/{date}.json"
     try:

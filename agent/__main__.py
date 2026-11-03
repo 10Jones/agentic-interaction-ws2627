@@ -8,7 +8,7 @@ from .logger import RunLogger
 
 
 def main() -> int:
-    # garantee windows console utf-8 format to avoid crashes with non-ASCII characters
+    # guarantee windows console utf-8 format to avoid crashes with non-ASCII characters
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 

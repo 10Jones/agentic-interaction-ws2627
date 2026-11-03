@@ -9,7 +9,7 @@ REQUIRED = ["OPENAI_BASE_URL", "MODEL", "OPENAI_API_KEY", "DATA_BASE_URL"]
 
 
 def load_config() -> dict:
-    """Loads varables from .env into os.environ.
+    """Loads variables from .env into os.environ.
     Variables that are already set in real environment are overwritten.
     """
 
