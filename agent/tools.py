@@ -3,12 +3,13 @@
 import datetime
 
 import requests
+from openai.types.chat import ChatCompletionToolParam
 
 # JSON schema in the OPENAI "tools" format. The model never runs the tool itself:
 # it only returns the tool name and arguments, and the code executes the call.
 # The description matters, because the model decides from it when to call the tool.
 
-TOOLS = [
+TOOLS: list[ChatCompletionToolParam] = [
     {
         "type": "function",
         "function": {
@@ -30,6 +31,21 @@ TOOLS = [
         },
     }
 ]
+
+
+def get_calendar_range(base_url: str) -> tuple[str | None, str | None]:
+    """Read the first and last available day from the index at the data URL.
+
+    Returns (None, None) if the index cannot be loaded, so the agent still
+    works without knowing the range.
+    """
+    try:
+        resp = requests.get(f"{base_url}/", timeout=10)
+        resp.raise_for_status()
+        days = resp.json()["days"]
+        return days["first"], days["last"]
+    except (requests.RequestException, ValueError, KeyError):
+        return None, None
 
 
 def get_calendar_day(date: str, base_url: str) -> dict:

@@ -1,5 +1,6 @@
 """Entry point: python -m agent "<task>" """
 
+import io
 import sys
 
 from .agent import run
@@ -9,8 +10,9 @@ from .logger import RunLogger
 
 def main() -> int:
     # guarantee windows console utf-8 format to avoid crashes with non-ASCII characters
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
 
     if len(sys.argv) != 2:
         print(

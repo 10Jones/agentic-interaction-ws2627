@@ -79,13 +79,18 @@ python -m agent "Which days between 26 and 30 October have no appointments?"
 
 ### How it works
 
-1. The task is sent to the model together with a system prompt and the tool definition.
-2. The model calls the tool `get_calendar_day(date)` as often as needed (once per day).
-3. The tool loads `{DATA_BASE_URL}/calendar/<YYYY-MM-DD>.json` over HTTP. The data is
+1. The agent reads the available day range from the data index.
+2. The task is sent to the model together with a system prompt and the tool definition.
+3. The model calls the tool `get_calendar_day(date)` as often as needed (once per day).
+4. The tool loads `{DATA_BASE_URL}/calendar/<YYYY-MM-DD>.json` over HTTP. The data is
    never copied locally.
-4. The model answers based on the tool results.
-The mock calendar covers 26 October 2026 to 8 November 2026. Requests outside this
-range return an error to the model, which then tells the user that no data is available.
+5. The model answers based on the tool results.
+
+The available day range is read at start-up from the index at `DATA_BASE_URL`
+(`days.first` and `days.last`) and passed to the model in the system prompt. If the
+index cannot be loaded, the agent still works without knowing the range. Requests for
+days outside the calendar return an error to the model, which then tells the user that
+no data is available.
 
 Currently the agent can only read appointments; it cannot create or change them.
 
