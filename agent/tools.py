@@ -44,7 +44,7 @@ def get_calendar_range(base_url: str) -> tuple[str | None, str | None]:
         resp.raise_for_status()
         days = resp.json()["days"]
         return days["first"], days["last"]
-    except (requests.RequestException, ValueError, KeyError):
+    except (requests.RequestException, ValueError, KeyError, TypeError):
         return None, None
 
 
@@ -58,7 +58,7 @@ def get_calendar_day(date: str, base_url: str) -> dict:
     # validate the format first
     try:
         datetime.date.fromisoformat(date)
-    except ValueError:
+    except (TypeError, ValueError):
         return {"error": f"Invalid date '{date}', expected format YYYY-MM-DD."}
 
     url = f"{base_url}/calendar/{date}.json"
@@ -75,4 +75,7 @@ def get_calendar_day(date: str, base_url: str) -> dict:
         return {"error": f"HTTP {resp.status_code} while loading {date}."}
 
     # pass unchanged json to model
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError:
+        return {"error": f"Calendar data for {date} is not valid JSON."}

@@ -2,9 +2,15 @@
 
 import json
 import time
-from datetime import date
+from datetime import date, timedelta
 
-from openai import BadRequestError, OpenAI
+from openai import (
+    APIConnectionError,
+    BadRequestError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
 from .tools import TOOLS, get_calendar_day, get_calendar_range
@@ -18,6 +24,27 @@ MAX_STEPS = 20
 # retry usually works.
 MAX_RETRIES = 3
 
+# Base wait between retries after a temporary API problem (multiplied by the
+# attempt number). The free tier allows only 8,000 tokens per minute, so a
+# rate limit (429) needs some time to clear.
+RETRY_WAIT_SECONDS = 10
+
+
+def list_days(start: str | None, end: str | None) -> str:
+    """One entry per calendar day ("Mon 2026-10-26, Tue ..."), so the model does
+    not have to work out dates and weekdays itself. Empty if the range is unusable."""
+    if not start or not end:
+        return ""
+    try:
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+    except ValueError:
+        return ""
+    count = (last - first).days + 1
+    if not 0 < count <= 62:  # reversed range, or too long for a prompt
+        return ""
+    days = (first + timedelta(days=i) for i in range(count))
+    return ", ".join(f"{d.strftime('%a')} {d.isoformat()}" for d in days)
+
 
 def build_system_prompt(
     start_date_calendar: str | None, end_date_calendar: str | None
@@ -30,14 +57,22 @@ def build_system_prompt(
         if start_date_calendar and end_date_calendar
         else ""
     )
+    days = list_days(start_date_calendar, end_date_calendar)
+    if coverage and days:
+        coverage += f"Available days: {days}. "
+
     return (
         "You are a calendar assistant. Answer questions only based on the data "
         "returned by the tool get_calendar_day. Never invent appointments.\n"
         f"Today is {today.isoformat()} ({today.strftime('%A')}). "
         f"{coverage}"
         "Convert relative dates such as 'tomorrow', 'next Friday' or 'last week' "
-        "into concrete dates (weeks run from Monday to Sunday). "
-        "For questions that span several days, call the tool once for each day. "
+        "into concrete dates. Weeks run from Monday to Sunday: 'this week' is the week "
+        "that contains today, 'last week' is the week before it. "
+        "The tool reads one day per call. If a question needs several days, request "
+        "the tool once for each day. "
+        # "all of them in the same response (several tool calls at once) instead of "
+        # "them in the same response (several tool calls at once) instead of one after another. "
         "Keep answers short and reply in the language of the question. "
         "You can currently only read appointments, not create or change them."
     )
@@ -50,7 +85,7 @@ def create_with_retry(
     log,
     step: int,
 ) -> ChatCompletion:
-    """Send the request; retry on unparsable output or an empty answer."""
+    """Send the request; retry on bad output, temporary API errors or empty answers."""
     for attempt in range(1, MAX_RETRIES + 1):
         # Identifies the failed request in the log (attempts restart at 1 per step).
         where = f"Model step {step}, attempt {attempt}/{MAX_RETRIES}"
@@ -65,7 +100,17 @@ def create_with_retry(
                 raise
             # json.dumps keeps the detail valid JSON instead of a Python dict repr.
             body = json.dumps(e.body, ensure_ascii=False, default=str)
-            log.log("error", ok=False, detail=f"{where}: {body}")
+            log.log(
+                "error", ok=False, detail=f"{where} (request_id={e.request_id}): {body}"
+            )
+            continue
+        except (RateLimitError, APIConnectionError, InternalServerError) as e:
+            # Temporary problems: rate limit (429), network or timeout, server error
+            # Wait and try again instead of aborting the whole run.
+            if attempt == MAX_RETRIES:
+                raise
+            log.log("error", ok=False, detail=f"{where}: {type(e).__name__}: {e}")
+            time.sleep(RETRY_WAIT_SECONDS * attempt)
             continue
 
         # A usable response contains either a tool call or some text.
@@ -82,7 +127,13 @@ def create_with_retry(
 
 
 def run(task: str, cfg: dict, log) -> str:
-    client = OpenAI(base_url=cfg["OPENAI_BASE_URL"], api_key=cfg["OPENAI_API_KEY"])
+    # The timeout keeps a hanging connection from blocking the run for minutes
+    # (the SDK default is 10 minutes).
+    client = OpenAI(
+        base_url=cfg["OPENAI_BASE_URL"],
+        api_key=cfg["OPENAI_API_KEY"],
+        timeout=60.0,
+    )
 
     # The available day range comes from the data index, so it is never hardcoded.
     start_date_calendar, end_date_calendar = get_calendar_range(cfg["DATA_BASE_URL"])
@@ -135,6 +186,9 @@ def run(task: str, cfg: dict, log) -> str:
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
+                args = {}
+            # Valid JSON is not always an object (e.g. a bare string).
+            if not isinstance(args, dict):
                 args = {}
             log.log("tool_call", tool=name, args=args, duration_ms=llm_ms)
 

@@ -15,6 +15,11 @@ class RunLogger:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.path = Path(log_dir) / f"{stamp}_{self.run_id}.jsonl"
 
+        # Keep the file open for the whole run. On Windows, antivirus, cloud sync
+        # or indexing tools can briefly lock a file, so re-opening it for every
+        # entry can fail with PermissionError. An already open handle is not affected.
+        self._file = open(self.path, "a", encoding="utf-8") #noqa: SIM115
+
     def log(self, event, ok=True, tool=None, args=None, duration_ms=None, detail=None):
         """Append one entry. 'event' is either user_task,
         tool_call, tool_result, final, or error.
@@ -35,7 +40,15 @@ class RunLogger:
         if detail is not None:
             entry["detail"] = detail
 
-        # open in append mode, so nothing is lost if the run crashes, ensure ASCII false,
-        # to keep logs readable in file
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # ensure_ascii=False keeps umlauts etc. readable in the file.
+        self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # Flush after every entry, so nothing is lost if the run crashes.
+        self._file.flush()
+
+        # # open in append mode, so nothing is lost if the run crashes, ensure ASCII false,
+        # # to keep logs readable in file
+        # with open(self.path, "a", encoding="utf-8") as f:
+        #     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def close(self):
+        self._file.close()
