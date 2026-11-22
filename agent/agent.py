@@ -13,7 +13,13 @@ from openai import (
 )
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
-from .tools import TOOLS, get_calendar_day, get_calendar_range
+from .tools import (
+    TOOLS,
+    get_calendar_day,
+    get_calendar_range,
+    get_train_connections,
+    get_weather,
+)
 
 # max number of steps the model is allowed to take, so a confused model does not loop and burn tokens
 # The model usually requests one day per round, so a whole 14-day calendar needs about 15 rounds.
@@ -62,19 +68,31 @@ def build_system_prompt(
         coverage += f"Available days: {days}. "
 
     return (
-        "You are a calendar assistant. Answer questions only based on the data "
-        "returned by the tool get_calendar_day. Never invent appointments.\n"
+        "You are a calendar and travel assistant. Answer questions only based on "
+        "the data returned by your tools. Never invent appointments, weather "
+        "values or train times.\n"
         f"Today is {today.isoformat()} ({today.strftime('%A')}). "
         f"{coverage}"
         "Convert relative dates such as 'tomorrow', 'next Friday' or 'last week' "
         "into concrete dates. Weeks run from Monday to Sunday: 'this week' is the week "
         "that contains today, 'last week' is the week before it. "
-        "The tool reads one day per call. If a question needs several days, request "
-        "the tool once for each day. "
+        "get_calendar_day reads one day per call. If a question needs several days, "
+        "request the tool once for each day. "
+        "get_weather gives the forecast for one city and day, get_train_connections "
+        "the trains between two cities on one day. City codes are lowercase ASCII, "
+        "for example 'ulm' or 'muenchen' (München). Not every city, route and day "
+        "has weather or train data. "
+        "If the user names no starting point for a trip, start in Ulm. For a trip, "
+        "the weather matters at the starting point and at the destination, because "
+        "the user has to leave from there too: call get_weather for both cities on "
+        "the travel day and mention both in the answer. "
+        "If a task needs several tools, use all of them and name the results of each "
+        "in your answer. If a tool returns an error, tell the user that there is no "
+        "data for that place or day. Never estimate or guess the missing values. "
         # "all of them in the same response (several tool calls at once) instead of "
         # "them in the same response (several tool calls at once) instead of one after another. "
         "Keep answers short and reply in the language of the question. "
-        "You can currently only read appointments, not create or change them."
+        "You can only read data, not create or change appointments."
     )
 
 
@@ -195,6 +213,17 @@ def run(task: str, cfg: dict, log) -> str:
             t1 = time.perf_counter()
             if name == "get_calendar_day":
                 result = get_calendar_day(args.get("date", ""), cfg["DATA_BASE_URL"])
+            elif name == "get_weather":
+                result = get_weather(
+                    args.get("city", ""), args.get("date", ""), cfg["DATA_BASE_URL"]
+                )
+            elif name == "get_train_connections":
+                result = get_train_connections(
+                    args.get("origin", ""),
+                    args.get("destination", ""),
+                    args.get("date", ""),
+                    cfg["DATA_BASE_URL"],
+                )
             else:
                 # report unknown tools back to the model instead of crashing
                 result = {"error": f"Unknown tool: {name}"}

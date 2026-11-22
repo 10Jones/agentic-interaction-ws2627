@@ -85,6 +85,22 @@ class FakeCalendar:
         return self.results.get(date, {"date": date, "events": []})
 
 
+class FakeTool:
+    """Stands in for get_weather / get_train_connections and records the calls.
+
+    A call is stored as the tuple of its arguments without the base URL.
+    """
+
+    def __init__(self, result=None):
+        self.result = result if result is not None else {}
+        self.calls = []
+
+    def __call__(self, *args):
+        *tool_args, _base_url = args
+        self.calls.append(tuple(tool_args))
+        return self.result
+
+
 # --- API errors ----------------------------------------------------------------
 
 

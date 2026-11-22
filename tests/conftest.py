@@ -37,11 +37,18 @@ def start_run(monkeypatch, tmp_path):
     """Prepare the agent loop with a scripted model.
 
     Usage: llm, log = start_run(reply(...), reply(...), calendar=FakeCalendar())
+    The fakes `weather` and `transit` replace the two other tools the same way.
     Then call agent_module.run("task", CFG, log).
     """
     loggers = []
 
-    def _start(*script, calendar=None, day_range=("2026-10-26", "2026-11-08")):
+    def _start(
+        *script,
+        calendar=None,
+        weather=None,
+        transit=None,
+        day_range=("2026-10-26", "2026-11-08"),
+    ):
         llm = ScriptedLLM(*script)
 
         def make_client(**kwargs):
@@ -54,6 +61,10 @@ def start_run(monkeypatch, tmp_path):
         )
         if calendar is not None:
             monkeypatch.setattr(agent_module, "get_calendar_day", calendar)
+        if weather is not None:
+            monkeypatch.setattr(agent_module, "get_weather", weather)
+        if transit is not None:
+            monkeypatch.setattr(agent_module, "get_train_connections", transit)
         log = RunLogger(CFG["MODEL"], log_dir=str(tmp_path / "logs"))
         loggers.append(log)
         return llm, log
