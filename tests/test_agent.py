@@ -15,6 +15,7 @@ from agent import agent as agent_module
 from tests.helpers import (
     CFG,
     FakeCalendar,
+    FakeTool,
     auth_error,
     connection_error,
     events,
@@ -65,7 +66,11 @@ def test_endpoint_model_key_and_tool_come_from_the_config(start_run):
     assert llm.client_kwargs["timeout"] > 0
     (kwargs,) = llm.create_kwargs
     assert kwargs["model"] == CFG["MODEL"]
-    assert [t["function"]["name"] for t in kwargs["tools"]] == ["get_calendar_day"]
+    assert [t["function"]["name"] for t in kwargs["tools"]] == [
+        "get_calendar_day",
+        "get_weather",
+        "get_train_connections",
+    ]
 
 
 def test_a_two_day_task_runs_through_with_one_call(start_run):
@@ -90,6 +95,104 @@ def test_a_two_day_task_runs_through_with_one_call(start_run):
         "tool_result",
         "final",
     ]
+
+
+def test_a_task_with_two_different_tools_runs_through_with_one_call(start_run):
+    weather = FakeTool({"condition": "rain"})
+    transit = FakeTool({"connections": [{"departure": "08:02"}]})
+    llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call(
+                    {"origin": "ulm", "destination": "muenchen", "date": "2026-10-29"},
+                    "t1",
+                    name="get_train_connections",
+                ),
+                tool_call(
+                    {"city": "muenchen", "date": "2026-10-29"},
+                    "w1",
+                    name="get_weather",
+                ),
+            ]
+        ),
+        reply("Train at 08:02, take an umbrella: rain."),
+        weather=weather,
+        transit=transit,
+    )
+    assert run(log) == "Train at 08:02, take an umbrella: rain."
+    assert transit.calls == [("ulm", "muenchen", "2026-10-29")]
+    assert weather.calls == [("muenchen", "2026-10-29")]
+    results = {
+        m["tool_call_id"]: m["content"] for m in llm.requests[1] if m["role"] == "tool"
+    }
+    assert "08:02" in results["t1"]
+    assert "rain" in results["w1"]
+    entries = read_log(log.path)
+    assert [e["tool"] for e in entries if e["event"] == "tool_result"] == [
+        "get_train_connections",
+        "get_weather",
+    ]
+    assert events(entries)[-1] == "final"
+
+
+def test_the_tools_get_the_data_url_from_the_config(start_run):
+    seen = []
+
+    def spy(name):
+        def tool(*args):
+            seen.append((name, args[-1]))
+            return {}
+
+        return tool
+
+    _llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call({"city": "ulm", "date": "2026-10-29"}, "w", "get_weather"),
+                tool_call(
+                    {"origin": "ulm", "destination": "muenchen", "date": "2026-10-29"},
+                    "t",
+                    "get_train_connections",
+                ),
+            ]
+        ),
+        reply("done"),
+        weather=spy("weather"),
+        transit=spy("transit"),
+    )
+    run(log)
+    url = CFG["DATA_BASE_URL"]
+    assert seen == [("weather", url), ("transit", url)]
+
+
+def test_missing_weather_data_goes_to_the_model_and_the_run_continues(start_run):
+    error = {"error": "No data for weather in ulm on 2026-11-20 (only some days)."}
+    llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call({"city": "ulm", "date": "2026-11-20"}, "w", "get_weather")
+            ]
+        ),
+        reply("There is no weather data for that day."),
+        weather=FakeTool(error),
+    )
+    assert run(log) == "There is no weather data for that day."
+    (result,) = entries_of(log, "tool_result")
+    assert result["ok"] is False
+    assert "No data for weather" in llm.requests[1][-1]["content"]
+
+
+def test_broken_arguments_of_the_new_tools_do_not_crash_the_run(start_run):
+    # The real tools are used: they reject the empty values before any request.
+    _llm, log = start_run(
+        reply(tool_calls=[tool_call(raw="{", call_id="w", name="get_weather")]),
+        reply(
+            tool_calls=[tool_call(raw="[]", call_id="t", name="get_train_connections")]
+        ),
+        reply("Sorry, I could not read that."),
+    )
+    assert run(log) == "Sorry, I could not read that."
+    assert [e["ok"] for e in entries_of(log, "tool_result")] == [False, False]
 
 
 def test_the_history_grows_with_the_tool_request_and_its_result(start_run):
@@ -368,6 +471,93 @@ def test_the_prompt_contains_today_and_the_calendar_range():
     assert today.isoformat() in prompt
     assert today.strftime("%A") in prompt
     assert "The calendar covers 2026-10-26 to 2026-11-08." in prompt
+
+
+def test_the_prompt_names_all_tools_and_forbids_guessing_missing_data():
+    prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08")
+    for name in ("get_calendar_day", "get_weather", "get_train_connections"):
+        assert name in prompt
+    assert "Never estimate or guess" in prompt
+    assert "start in Ulm" in prompt
+
+
+def test_the_prompt_lists_the_known_cities_when_the_index_has_them():
+    cities = {"ulm": "Ulm", "muenchen": "München"}
+    prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08", cities)
+    assert "ulm = Ulm, muenchen = München" in prompt
+    assert "check every known city" in prompt
+
+
+def test_the_prompt_works_without_cities_and_only_claims_what_was_checked():
+    prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08")
+    assert "Known cities" not in prompt
+    assert "only for the cities and days you really checked" in prompt
+
+
+def test_the_cities_of_the_index_reach_the_system_prompt(start_run):
+    llm, log = start_run(reply("ok"), cities={"ulm": "Ulm", "bonn": "Bonn"})
+    run(log)
+    assert "ulm = Ulm, bonn = Bonn" in llm.requests[0][0]["content"]
+
+
+def test_a_weather_request_with_end_date_reads_the_whole_period(start_run, monkeypatch):
+    seen = []
+
+    def fake_range(city, start, end, base_url):
+        seen.append((city, start, end, base_url))
+        return {"city": city, "days": {}, "no_data": [start, end], "failed": {}}
+
+    monkeypatch.setattr(agent_module, "get_weather_range", fake_range)
+    single = FakeTool()
+    llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call(
+                    {
+                        "city": "muenchen",
+                        "date": "2026-10-26",
+                        "end_date": "2026-11-08",
+                    },
+                    "w",
+                    "get_weather",
+                )
+            ]
+        ),
+        reply("No rain data."),
+        weather=single,
+    )
+    assert run(log) == "No rain data."
+    assert seen == [("muenchen", "2026-10-26", "2026-11-08", CFG["DATA_BASE_URL"])]
+    assert single.calls == []  # the single-day tool was not used
+    assert "no_data" in llm.requests[1][-1]["content"]
+
+
+def test_the_log_explains_why_a_tool_failed(start_run):
+    error = {"error": "No data for weather in ulm on 2026-11-20 (only some days)."}
+    _llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call({"city": "ulm", "date": "2026-11-20"}, "w", "get_weather")
+            ]
+        ),
+        reply("no data"),
+        weather=FakeTool(error),
+    )
+    run(log)
+    (result,) = entries_of(log, "tool_result")
+    assert result["ok"] is False
+    assert result["detail"] == error["error"]
+
+
+def test_a_successful_tool_result_has_no_detail(start_run):
+    _llm, log = start_run(
+        reply(tool_calls=[tool_call({"date": "2026-10-26"})]),
+        reply("done"),
+        calendar=FakeCalendar({"2026-10-26": {"events": []}}),
+    )
+    run(log)
+    (result,) = entries_of(log, "tool_result")
+    assert "detail" not in result
 
 
 def test_the_prompt_lists_every_calendar_day_with_its_weekday():

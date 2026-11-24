@@ -13,7 +13,15 @@ from openai import (
 )
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
-from .tools import TOOLS, get_calendar_day, get_calendar_range
+from .tools import (
+    TOOLS,
+    get_calendar_day,
+    get_calendar_range,
+    get_cities,
+    get_train_connections,
+    get_weather,
+    get_weather_range,
+)
 
 # max number of steps the model is allowed to take, so a confused model does not loop and burn tokens
 # The model usually requests one day per round, so a whole 14-day calendar needs about 15 rounds.
@@ -47,7 +55,9 @@ def list_days(start: str | None, end: str | None) -> str:
 
 
 def build_system_prompt(
-    start_date_calendar: str | None, end_date_calendar: str | None
+    start_date_calendar: str | None,
+    end_date_calendar: str | None,
+    cities: dict[str, str] | None = None,
 ) -> str:
     # model does not have a date, so we need to provide a date for relative expressions like "tomorrow"
     today = date.today()
@@ -61,20 +71,45 @@ def build_system_prompt(
     if coverage and days:
         coverage += f"Available days: {days}. "
 
+    # Only mention the cities if the index lists them.
+    city_info = (
+        "Known cities (code = name): "
+        + ", ".join(f"{code} = {name}" for code, name in cities.items())
+        + ". If a question names no city, check every known city. "
+        if cities
+        else ""
+    )
+
     return (
-        "You are a calendar assistant. Answer questions only based on the data "
-        "returned by the tool get_calendar_day. Never invent appointments.\n"
+        "You are a calendar and travel assistant. Answer questions only based on "
+        "the data returned by your tools. Never invent appointments, weather "
+        "values or train times.\n"
         f"Today is {today.isoformat()} ({today.strftime('%A')}). "
         f"{coverage}"
         "Convert relative dates such as 'tomorrow', 'next Friday' or 'last week' "
         "into concrete dates. Weeks run from Monday to Sunday: 'this week' is the week "
         "that contains today, 'last week' is the week before it. "
-        "The tool reads one day per call. If a question needs several days, request "
-        "the tool once for each day. "
+        "get_calendar_day reads one day per call. If a question needs several days, "
+        "request the tool once for each day. "
+        "get_weather gives the forecast for one city and day. For a question about "
+        "several days call it once per city with date and end_date: the result "
+        "lists the days with a forecast and the days without data. "
+        "get_train_connections gives the trains between two cities on one day. "
+        "City codes are lowercase ASCII, for example 'ulm' or 'muenchen' (München). "
+        f"{city_info}"
+        "Not every city, route and day has weather or train data. "
+        "If the user names no starting point for a trip, start in Ulm. For a trip, "
+        "the weather matters at the starting point and at the destination, because "
+        "the user has to leave from there too: call get_weather for both cities on "
+        "the travel day and mention both in the answer. "
+        "If a task needs several tools, use all of them and name the results of each "
+        "in your answer. If a tool returns an error, tell the user that there is no "
+        "data for that place or day. Never estimate or guess the missing values. "
+        "Say that data is missing only for the cities and days you really checked. "
         # "all of them in the same response (several tool calls at once) instead of "
         # "them in the same response (several tool calls at once) instead of one after another. "
         "Keep answers short and reply in the language of the question. "
-        "You can currently only read appointments, not create or change them."
+        "You can only read data, not create or change appointments."
     )
 
 
@@ -137,11 +172,14 @@ def run(task: str, cfg: dict, log) -> str:
 
     # The available day range comes from the data index, so it is never hardcoded.
     start_date_calendar, end_date_calendar = get_calendar_range(cfg["DATA_BASE_URL"])
+    cities = get_cities(cfg["DATA_BASE_URL"])
 
     messages: list[ChatCompletionMessageParam] = [
         {
             "role": "system",
-            "content": build_system_prompt(start_date_calendar, end_date_calendar),
+            "content": build_system_prompt(
+                start_date_calendar, end_date_calendar, cities
+            ),
         },
         {"role": "user", "content": task},
     ]
@@ -195,6 +233,24 @@ def run(task: str, cfg: dict, log) -> str:
             t1 = time.perf_counter()
             if name == "get_calendar_day":
                 result = get_calendar_day(args.get("date", ""), cfg["DATA_BASE_URL"])
+            elif name == "get_weather" and args.get("end_date"):
+                result = get_weather_range(
+                    args.get("city", ""),
+                    args.get("date", ""),
+                    args["end_date"],
+                    cfg["DATA_BASE_URL"],
+                )
+            elif name == "get_weather":
+                result = get_weather(
+                    args.get("city", ""), args.get("date", ""), cfg["DATA_BASE_URL"]
+                )
+            elif name == "get_train_connections":
+                result = get_train_connections(
+                    args.get("origin", ""),
+                    args.get("destination", ""),
+                    args.get("date", ""),
+                    cfg["DATA_BASE_URL"],
+                )
             else:
                 # report unknown tools back to the model instead of crashing
                 result = {"error": f"Unknown tool: {name}"}
@@ -206,6 +262,8 @@ def run(task: str, cfg: dict, log) -> str:
                 args=args,
                 ok="error" not in result,
                 duration_ms=tool_ms,
+                # Why did a tool fail? Without this the log only says ok=false.
+                detail=result.get("error", None),
             )
 
             # tool_call_id links this result to the request above

@@ -1,6 +1,7 @@
 """Tool definition (what the model sees) and its implementation ( what we run)"""
 
 import datetime
+import re
 
 import requests
 from openai.types.chat import ChatCompletionToolParam
@@ -29,8 +30,85 @@ TOOLS: list[ChatCompletionToolParam] = [
                 "required": ["date"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": (
+                "Reads the weather forecast for one city on one day. With end_date "
+                "it reads every day from date to end_date in one call and lists the "
+                "days without data. Not every city and day has data. An error means "
+                "there is no forecast for that city or day."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": (
+                            "City code in lowercase ASCII, e.g. 'ulm' or 'muenchen' (München)"
+                        ),
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date in the format YYYY-MM-DD, e.g. 2026-10-29",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": (
+                            "Optional last day (YYYY-MM-DD) to read a whole period, "
+                            "at most 31 days."
+                        ),
+                    },
+                },
+                "required": ["city", "date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_train_connections",
+            "description": (
+                "Reads the train connections (departure and arrival times) from one "
+                "city to another on one day. Not every route and day has data. "
+                "An error means there are no connections for that route or day."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": (
+                            "Departure city code in lowercase ASCII, e.g. 'ulm'"
+                        ),
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": (
+                            "Arrival city code in lowercase ASCII, e.g. 'ulm' or "
+                            "'muenchen' (München)"
+                        ),
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Date in the format YYYY-MM-DD, e.g. 2026-10-29",
+                    },
+                },
+                "required": ["origin", "destination", "date"],
+            },
+        },
+    },
 ]
+
+# City codes end up in the URL path, so only plain characters are accepted.
+_CITY_CODE = re.compile(r"[a-z0-9_-]+")
+_UMLAUTS = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
+# Start of the message for HTTP 404. get_weather_range recognizes "no data" by it.
+_NO_DATA = "No data for"
+# Longest period one get_weather call with end_date may cover.
+_MAX_RANGE_DAYS = 31
 
 
 def get_calendar_range(base_url: str) -> tuple[str | None, str | None]:
@@ -46,6 +124,26 @@ def get_calendar_range(base_url: str) -> tuple[str | None, str | None]:
         return days["first"], days["last"]
     except (requests.RequestException, ValueError, KeyError, TypeError):
         return None, None
+
+
+def get_cities(base_url: str) -> dict[str, str]:
+    """Read the known cities ({"ulm": "Ulm", ...}) from the index at the data URL.
+
+    Returns {} if the index cannot be loaded, so the agent still works without it.
+    """
+    try:
+        resp = requests.get(f"{base_url}/", timeout=10)
+        resp.raise_for_status()
+        cities = resp.json()["cities"]
+        return {str(code): str(name) for code, name in cities.items()}
+    except (
+        requests.RequestException,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+    ):
+        return {}
 
 
 def get_calendar_day(date: str, base_url: str) -> dict:
@@ -79,3 +177,107 @@ def get_calendar_day(date: str, base_url: str) -> dict:
         return resp.json()
     except ValueError:
         return {"error": f"Calendar data for {date} is not valid JSON."}
+
+
+def _city_code(city) -> str | None:
+    """Turn e.g. 'München ' into 'muenchen'. None if it is not a plain city code."""
+    if not isinstance(city, str):
+        return None
+    code = city.strip().lower().translate(_UMLAUTS)
+    return code if _CITY_CODE.fullmatch(code) else None
+
+
+def _is_iso_date(date) -> bool:
+    """True only for a real date written exactly as YYYY-MM-DD."""
+    try:
+        return datetime.date.fromisoformat(date).isoformat() == date
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_json(url: str, what: str) -> dict:
+    """Load one JSON document. Every problem is returned as {error: ...}.
+
+    `what` names the request in the messages, e.g. "weather in ulm on 2026-10-29".
+    Weather and connections exist only for single days, so HTTP 404 is a normal
+    result ("no data"), not a crash.
+    """
+    try:
+        resp = requests.get(url, timeout=10)
+    except requests.RequestException as e:
+        return {"error": f"Network error: {e}"}
+    if resp.status_code == 404:
+        return {"error": f"{_NO_DATA} {what} (only some cities and days are covered)."}
+    if not resp.ok:
+        return {"error": f"HTTP {resp.status_code} while loading {what}."}
+    try:
+        return resp.json()
+    except ValueError:
+        return {"error": f"Data for {what} is not valid JSON."}
+
+
+def get_weather(city: str, date: str, base_url: str) -> dict:
+    """Load the weather forecast of one city and day."""
+    code = _city_code(city)
+    if code is None:
+        return {"error": f"Invalid city '{city}', expected a code like 'ulm'."}
+    if not _is_iso_date(date):
+        return {"error": f"Invalid date '{date}', expected format YYYY-MM-DD."}
+    return _get_json(
+        f"{base_url}/weather/{code}/{date}.json", f"weather in {code} on {date}"
+    )
+
+
+def get_train_connections(
+    origin: str, destination: str, date: str, base_url: str
+) -> dict:
+    """Load the train connections between two cities on one day."""
+    start, end = _city_code(origin), _city_code(destination)
+    if start is None or end is None:
+        return {
+            "error": f"Invalid city '{origin}' or '{destination}', "
+            "expected codes like 'ulm'."
+        }
+    if not _is_iso_date(date):
+        return {"error": f"Invalid date '{date}', expected format YYYY-MM-DD."}
+    return _get_json(
+        f"{base_url}/transit/{start}/{end}/{date}.json",
+        f"train connections {start} -> {end} on {date}",
+    )
+
+
+def get_weather_range(city: str, start_date: str, end_date: str, base_url: str) -> dict:
+    """Load the weather of one city for every day from start_date to end_date.
+
+    The result says for every day of the period whether there is a forecast
+    ("days"), no data ("no_data") or the request failed ("failed"). The model so
+    sees exactly which days were checked and cannot conclude "no data" for days it
+    never looked at.
+    """
+    code = _city_code(city)
+    if code is None:
+        return {"error": f"Invalid city '{city}', expected a code like 'ulm'."}
+    for day in (start_date, end_date):
+        if not _is_iso_date(day):
+            return {"error": f"Invalid date '{day}', expected format YYYY-MM-DD."}
+    first = datetime.date.fromisoformat(start_date)
+    count = (datetime.date.fromisoformat(end_date) - first).days + 1
+    if not 0 < count <= _MAX_RANGE_DAYS:
+        return {
+            "error": f"The period must be 1 to {_MAX_RANGE_DAYS} days, "
+            f"from {start_date} to {end_date} are {count}."
+        }
+
+    days: dict[str, dict] = {}
+    no_data: list[str] = []
+    failed: dict[str, str] = {}
+    for offset in range(count):
+        day = (first + datetime.timedelta(days=offset)).isoformat()
+        result = get_weather(code, day, base_url)
+        if "error" not in result:
+            days[day] = result
+        elif result["error"].startswith(_NO_DATA):
+            no_data.append(day)
+        else:
+            failed[day] = result["error"]
+    return {"city": code, "days": days, "no_data": no_data, "failed": failed}

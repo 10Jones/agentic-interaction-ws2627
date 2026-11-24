@@ -52,6 +52,7 @@ def script_the_model(monkeypatch, *script):
     monkeypatch.setattr(
         agent_module, "get_calendar_range", lambda base_url: (None, None)
     )
+    monkeypatch.setattr(agent_module, "get_cities", lambda base_url: {})
     monkeypatch.setattr(agent_module, "get_calendar_day", FakeCalendar())
     return llm
 
