@@ -481,6 +481,85 @@ def test_the_prompt_names_all_tools_and_forbids_guessing_missing_data():
     assert "start in Ulm" in prompt
 
 
+def test_the_prompt_lists_the_known_cities_when_the_index_has_them():
+    cities = {"ulm": "Ulm", "muenchen": "München"}
+    prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08", cities)
+    assert "ulm = Ulm, muenchen = München" in prompt
+    assert "check every known city" in prompt
+
+
+def test_the_prompt_works_without_cities_and_only_claims_what_was_checked():
+    prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08")
+    assert "Known cities" not in prompt
+    assert "only for the cities and days you really checked" in prompt
+
+
+def test_the_cities_of_the_index_reach_the_system_prompt(start_run):
+    llm, log = start_run(reply("ok"), cities={"ulm": "Ulm", "bonn": "Bonn"})
+    run(log)
+    assert "ulm = Ulm, bonn = Bonn" in llm.requests[0][0]["content"]
+
+
+def test_a_weather_request_with_end_date_reads_the_whole_period(start_run, monkeypatch):
+    seen = []
+
+    def fake_range(city, start, end, base_url):
+        seen.append((city, start, end, base_url))
+        return {"city": city, "days": {}, "no_data": [start, end], "failed": {}}
+
+    monkeypatch.setattr(agent_module, "get_weather_range", fake_range)
+    single = FakeTool()
+    llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call(
+                    {
+                        "city": "muenchen",
+                        "date": "2026-10-26",
+                        "end_date": "2026-11-08",
+                    },
+                    "w",
+                    "get_weather",
+                )
+            ]
+        ),
+        reply("No rain data."),
+        weather=single,
+    )
+    assert run(log) == "No rain data."
+    assert seen == [("muenchen", "2026-10-26", "2026-11-08", CFG["DATA_BASE_URL"])]
+    assert single.calls == []  # the single-day tool was not used
+    assert "no_data" in llm.requests[1][-1]["content"]
+
+
+def test_the_log_explains_why_a_tool_failed(start_run):
+    error = {"error": "No data for weather in ulm on 2026-11-20 (only some days)."}
+    _llm, log = start_run(
+        reply(
+            tool_calls=[
+                tool_call({"city": "ulm", "date": "2026-11-20"}, "w", "get_weather")
+            ]
+        ),
+        reply("no data"),
+        weather=FakeTool(error),
+    )
+    run(log)
+    (result,) = entries_of(log, "tool_result")
+    assert result["ok"] is False
+    assert result["detail"] == error["error"]
+
+
+def test_a_successful_tool_result_has_no_detail(start_run):
+    _llm, log = start_run(
+        reply(tool_calls=[tool_call({"date": "2026-10-26"})]),
+        reply("done"),
+        calendar=FakeCalendar({"2026-10-26": {"events": []}}),
+    )
+    run(log)
+    (result,) = entries_of(log, "tool_result")
+    assert "detail" not in result
+
+
 def test_the_prompt_lists_every_calendar_day_with_its_weekday():
     prompt = agent_module.build_system_prompt("2026-10-26", "2026-11-08")
     assert "Available days: Mon 2026-10-26, Tue 2026-10-27" in prompt

@@ -140,6 +140,7 @@ for `tool_result` it is the duration of the tool execution.
 │   ├── logger.py      # JSON Lines run log
 │   └── tools.py       # tool definitions, calendar, weather and train access
 ├── logs/              # created at runtime (git-ignored)
+├── tests/             # contains pytests to test basic functionality
 ├── .env               # local configuration (git-ignored)
 ├── .env.example
 ├── .gitignore

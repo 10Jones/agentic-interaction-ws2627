@@ -42,6 +42,8 @@ class Http:
         self.calls.append((url, kwargs))
         if isinstance(self.outcome, Exception):
             raise self.outcome
+        if callable(self.outcome):  # decide per URL, e.g. data only for some days
+            return self.outcome(url)
         return self.outcome
 
 
@@ -319,3 +321,91 @@ def test_a_connections_network_problem_is_returned_as_an_error(http):
     http.outcome = requests.ConnectionError("boom")
     result = tools.get_train_connections("ulm", "muenchen", "2026-10-29", BASE)
     assert result["error"].startswith("Network error")
+
+
+# --- get_weather_range --------------------------------------------------------------
+
+
+def test_a_weather_period_lists_days_with_data_without_data_and_failed(http):
+    def by_day(url):
+        if url.endswith("2026-10-27.json"):
+            return FakeResponse(200, {"condition": "rain"})
+        if url.endswith("2026-10-28.json"):
+            return FakeResponse(500)
+        return FakeResponse(404)
+
+    http.outcome = by_day
+    result = tools.get_weather_range("ulm", "2026-10-26", "2026-10-28", BASE)
+    assert result["city"] == "ulm"
+    assert result["days"] == {"2026-10-27": {"condition": "rain"}}
+    assert result["no_data"] == ["2026-10-26"]
+    assert list(result["failed"]) == ["2026-10-28"]
+    assert "500" in result["failed"]["2026-10-28"]
+    assert [u for u, _ in http.calls] == [
+        f"{BASE}/weather/ulm/2026-10-26.json",
+        f"{BASE}/weather/ulm/2026-10-27.json",
+        f"{BASE}/weather/ulm/2026-10-28.json",
+    ]
+
+
+def test_a_period_without_any_data_still_names_every_day_it_checked(http):
+    http.outcome = FakeResponse(404)
+    result = tools.get_weather_range("ulm", "2026-10-26", "2026-10-27", BASE)
+    assert result["days"] == {}
+    assert result["no_data"] == ["2026-10-26", "2026-10-27"]
+
+
+def test_a_period_of_one_day_is_allowed(http):
+    http.outcome = FakeResponse(200, {})
+    result = tools.get_weather_range("ulm", "2026-10-26", "2026-10-26", BASE)
+    assert list(result["days"]) == ["2026-10-26"]
+
+
+@pytest.mark.parametrize(
+    "start, end",
+    [
+        ("2026-10-28", "2026-10-26"),  # reversed
+        ("2026-10-01", "2026-11-05"),  # longer than 31 days
+    ],
+)
+def test_an_unusable_period_is_rejected_without_a_request(http, start, end):
+    result = tools.get_weather_range("ulm", start, end, BASE)
+    assert "period" in result["error"]
+    assert http.calls == []
+
+
+def test_a_period_with_invalid_input_is_rejected_without_a_request(http):
+    cases = [
+        (("", "2026-10-26", "2026-10-27"), "Invalid city"),
+        (("ulm", "2026-10-26", "soon"), "Invalid date"),
+        (("ulm", "x", "2026-10-27"), "Invalid date"),
+    ]
+    for args, message in cases:
+        assert message in tools.get_weather_range(*args, BASE)["error"]
+    assert http.calls == []
+
+
+# --- get_cities ---------------------------------------------------------------------
+
+
+def test_the_cities_are_read_from_the_index(http):
+    http.outcome = FakeResponse(200, {"cities": {"ulm": "Ulm", "muenchen": "München"}})
+    assert tools.get_cities(BASE) == {"ulm": "Ulm", "muenchen": "München"}
+    assert http.calls[0][0] == f"{BASE}/"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        requests.Timeout("too slow"),
+        FakeResponse(500),
+        FakeResponse(200, bad_json=True),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"cities": ["ulm"]}),
+        FakeResponse(200, None),
+    ],
+    ids=["network", "http error", "no json", "no key", "wrong shape", "empty"],
+)
+def test_without_a_usable_index_there_are_no_cities(http, outcome):
+    http.outcome = outcome
+    assert tools.get_cities(BASE) == {}

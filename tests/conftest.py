@@ -48,6 +48,7 @@ def start_run(monkeypatch, tmp_path):
         weather=None,
         transit=None,
         day_range=("2026-10-26", "2026-11-08"),
+        cities=None,
     ):
         llm = ScriptedLLM(*script)
 
@@ -59,6 +60,7 @@ def start_run(monkeypatch, tmp_path):
         monkeypatch.setattr(
             agent_module, "get_calendar_range", lambda base_url: day_range
         )
+        monkeypatch.setattr(agent_module, "get_cities", lambda base_url: cities or {})
         if calendar is not None:
             monkeypatch.setattr(agent_module, "get_calendar_day", calendar)
         if weather is not None:
